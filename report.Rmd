@@ -1,0 +1,68 @@
+---
+title: "Is the gender gap in AI closing? Evidence from Wikipedia"
+author: "Naomi, Amber, Tristan (Group 73)"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = getwd())   # lets the section files find data/ and figures/
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+set.seed(3020)
+dir.create("figures", showWarnings = FALSE)
+```
+
+```{r load-data, include=FALSE}
+people = read.csv("data/people.csv", as.is = TRUE)
+edges  = read.csv("data/edges.csv", as.is = TRUE)
+
+# birth year 2000 = Wikidata's placeholder for "20th century", so treat it as unknown
+people$birth_year[people$birth_year == 2000] = NA
+
+people$era = ifelse(is.na(people$birth_year), "unknown",
+             ifelse(people$birth_year < 1950, "pre-1950",
+             ifelse(people$birth_year < 1970, "1950-69",
+             ifelse(people$birth_year < 1990, "1970-89", "1990+"))))
+people$recognition_lag = people$created_year - people$birth_year
+
+# women and men with a known birth year
+known = people[people$era != "unknown" & people$gender_group %in% c("female", "male"), ]
+known$era = factor(known$era, levels = c("pre-1950", "1950-69", "1970-89", "1990+"))
+```
+
+# Introduction
+
+Women remain under-represented in artificial intelligence (AI). This report uses
+Wikipedia to ask whether that gap is closing. We study `r nrow(people)` AI
+researchers with an English Wikipedia article and answer five research questions:
+
+1. Has the share of women in AI increased across birth eras?
+2. Are women recognised on Wikipedia later than men?
+3. Has the language used to describe women and men changed over time?
+4. Which AI subfields emerge from the biography text, and what share of each is women?
+5. Are women central in the network of biographies that link to each other?
+
+Code and data: https://github.com/minhhien365/COMP-3020---Group-Assignment
+
+# Data
+
+```{r child = "sections/01_data_collection.Rmd"}
+```
+
+# Analysis
+
+```{r child = "sections/02_rq1_rq2.Rmd"}
+```
+
+```{r child = "sections/03_rq3_rq4.Rmd"}
+```
+
+```{r child = "sections/04_rq5.Rmd"}
+```
+
+# Overall findings and limitations
+
+```{r child = "sections/05_overall_findings.Rmd"}
+```
