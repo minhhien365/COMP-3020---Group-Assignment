@@ -1,1 +1,240 @@
-naomi
+---
+editor_options:
+  markdown:
+    wrap: 72
+output: pdf_document
+---
+
+## RQ1: Has the share of women in AI increased across birth eras?
+
+**Hypotheses.**
+
+- H0: Gender and birth era are independent.
+- HA: Gender and birth era are not independent.
+
+**Test choice.** Both variables are categorical, so we use a chi-squared
+test for independence on the era x gender table of counts. The built-in
+test needs every expected count to be greater than 5, so we check this
+first.
+
+We first count the women and men in each birth era, convert these counts
+to percentages, and check the expected counts.
+
+```{r rq1-table}
+# writes p-values as "< 0.001" or "= 0.94" in the text
+fmt_p = function(p) if (p < 0.001) "< 0.001" else paste("=", signif(p, 2))
+
+tab = table(known$era, known$gender_group)
+tab
+
+# share of women and men in each era (%)
+round(prop.table(tab, 1) * 100, 1)
+
+# assumption check: expected counts
+ct = chisq.test(tab)
+round(ct$expected, 1)
+```
+
+Women are a minority in every era. All expected counts are above 5
+except women born 1990+ (`r round(ct$expected["1990+", "female"], 1)`),
+because that era has only `r sum(tab["1990+", ])` people. So we need
+simulation.
+
+```{r rq1-test}
+ct = chisq.test(tab, simulate.p.value = TRUE)
+ct
+```
+
+The p-value is `r fmt_p(ct$p.value)`, so we reject H0: the share of
+women differs between eras. The test does not show *how* it differs, so
+we plot the share of women in each era below. The error bars are
+bootstrap 95% confidence intervals; wider bars mean less certainty,
+which happens when an era has fewer people.
+
+```{r rq1-plot, fig.cap="Share of women among AI researchers by birth era. Error bars are bootstrap 95% confidence intervals."}
+# share of women in each era (%) and number of people in each era
+share = prop.table(tab, 1)[, "female"] * 100
+n = rowSums(tab)
+
+# bootstrap 95% confidence interval for each era
+lower = c()
+upper = c()
+for (e in levels(known$era)) {
+  women = known$gender_group[known$era == e] == "female"       # TRUE/FALSE for each person
+  boot = replicate(1000, mean(sample(women, replace = TRUE))) * 100
+  lower = c(lower, quantile(boot, 0.025))
+  upper = c(upper, quantile(boot, 0.975))
+}
+
+# line chart with error bars
+plot(1:4, share, type = "b", pch = 19, col = "darkorange", ylim = c(0, 40), xaxt = "n",
+     main = "Share of women in AI by birth era", xlab = "Birth era", ylab = "Women (%)")
+axis(1, at = 1:4, labels = paste0(names(share), " (n=", n, ")"))
+arrows(1:4, lower, 1:4, upper, angle = 90, code = 3, length = 0.05)
+
+# save a copy for the poster
+dev.copy(png, file.path(fig_dir, "rq1_share_women_by_era.png"), width = 1400, height = 900, res = 200)
+invisible(dev.off())
+```
+
+The share of women rises from `r round(share[1])`% (pre-1950) to
+`r round(share[2])`% (1950-69) and `r round(share[3])`% (1970-89), and
+the error bars for pre-1950 (`r round(lower[1])`-`r round(upper[1])`%)
+and 1970-89 (`r round(lower[3])`-`r round(upper[3])`%) do not overlap.
+The drop to `r round(share[4])`% for 1990+ rests on only `r n[4]` people
+(`r tab["1990+", "female"]` women), so its error bar is very wide
+(`r round(lower[4])`-`r round(upper[4])`%) and it should not be read as
+a reversal; younger researchers have also had less time to become
+notable.
+
+**Answer to RQ1:** yes, the share of women in AI has increased across
+birth eras, although women remain a minority in every era.
+
+## RQ2: Are women recognised on Wikipedia later than men?
+
+To measure how quickly a person is recognised on Wikipedia, we use
+recognition lag = year the article was created - birth year. For
+example, someone born in 1960 whose article was created in 2010 has a
+recognition lag of 50 years. A shorter lag means the person was
+recognised earlier in their life. If women in AI are overlooked, we
+would expect them to receive an article later in life than men, so their
+recognition lag would be longer.
+
+Recognition lag has two important limitations. First, Wikipedia was only
+launched in 2001, so anyone born long before then automatically has a
+big lag, whatever their gender. This means lag depends strongly on birth
+era, so we also compare women and men within each era. Second, the
+creation date reflects when a Wikipedia editor chose to write the
+article, not when the person achieved something notable. This is exactly
+why it is useful here: it measures when Wikipedia recognised them, not
+their career itself.
+
+**Hypotheses.**
+
+- H0: There is no difference in mean recognition lag between women and
+  men.
+- HA: There is a difference in mean recognition lag between women and
+  men.
+
+**Test choice.** We use a randomisation test for the difference in means
+and a Wilcoxon rank-sum test as a check.
+
+We first separate the recognition lags of women and men and compare
+their size, mean and median.
+
+```{r rq2-data}
+lagF = known$recognition_lag[known$gender_group == "female"]
+lagM = known$recognition_lag[known$gender_group == "male"]
+
+data.frame(group  = c("Women", "Men"),
+           n      = c(length(lagF), length(lagM)),
+           mean   = round(c(mean(lagF), mean(lagM)), 1),
+           median = c(median(lagF), median(lagM)))
+```
+
+Women and men have almost identical recognition lags overall: a mean of
+`r round(mean(lagF), 1)` vs `r round(mean(lagM), 1)` years, and a median
+of `r median(lagF)` vs `r median(lagM)` years. There are far more men
+(`r length(lagM)`) than women (`r length(lagF)`) with a known birth
+year.
+
+To test whether this difference could have occurred by chance, we run
+the randomisation test: if H0 is true, the gender labels do not matter,
+so we shuffle them 2000 times and recalculate the difference in means
+each time.
+
+```{r rq2-rand, fig.height=3.5, fig.cap="Randomisation distribution of the difference in mean recognition lag (women minus men) under H0. The red line is the observed difference."}
+obs_diff = mean(lagF) - mean(lagM)   # women minus men
+combined = c(lagF, lagM)
+nF = length(lagF)
+
+rand_diff = replicate(2000, {
+  shuffled = sample(combined)
+  mean(shuffled[1:nF]) - mean(shuffled[-(1:nF)])
+})
+
+# two-sided p-value: proportion of random differences at least as extreme as observed
+p_rand = mean(abs(rand_diff) >= abs(obs_diff))
+c(observed_difference = round(obs_diff, 2), p_value = p_rand)
+
+hist(rand_diff, breaks = 40, col = "grey80", main = "",
+     xlab = "Difference in sample means (women - men, years)")
+abline(v = obs_diff, col = "red", lwd = 2)
+```
+
+The observed difference in means is only `r round(obs_diff, 2)` years.
+In the histogram, the red line sits in the middle of the randomisation
+distribution, so a difference this small easily happens by chance. The
+p-value is `r p_rand`, so we do not reject H0: overall there is no
+evidence that women's lag differs from men's.
+
+Recognition lag is skewed, with a few people having very long lags that
+can pull the mean up or down. As a check, we also run a Wilcoxon
+rank-sum test, which compares the ranks of the lags instead of their
+actual values.
+
+```{r rq2-wilcox}
+wt = wilcox.test(lagF, lagM)
+wt
+```
+
+The Wilcoxon test agrees: W =
+`r format(unname(wt$statistic), scientific = FALSE)`, p
+`r fmt_p(wt$p.value)`, so there is no overall difference.
+
+Because lag depends strongly on birth era, we repeat the Wilcoxon test
+separately within each era to compare like with like.
+
+```{r rq2-era}
+era_tab = data.frame(era = levels(known$era), median_women = NA, median_men = NA, p_value = NA)
+
+for (i in 1:4) {
+  f = known$recognition_lag[known$era == era_tab$era[i] & known$gender_group == "female"]
+  m = known$recognition_lag[known$era == era_tab$era[i] & known$gender_group == "male"]
+  era_tab$median_women[i] = median(f)
+  era_tab$median_men[i]   = median(m)
+  era_tab$p_value[i]      = wilcox.test(f, m, exact = FALSE)$p.value
+}
+
+era_show = era_tab
+era_show$p_value = format.pval(era_tab$p_value, digits = 2, eps = 0.001)
+knitr::kable(era_show, digits = 1,
+             caption = "Median recognition lag (years) by gender within each birth era, with Wilcoxon rank-sum p-values.")
+```
+
+Splitting by era changes the picture. Women born before 1950 waited
+longer than men (median `r era_tab$median_women[1]` vs
+`r era_tab$median_men[1]` years, p `r fmt_p(era_tab$p_value[1])`), and
+so did women born 1950-69 (`r era_tab$median_women[2]` vs
+`r era_tab$median_men[2]` years, p `r fmt_p(era_tab$p_value[2])`). For
+1970-89 (`r era_tab$median_women[3]` vs `r era_tab$median_men[3]`, p
+`r fmt_p(era_tab$p_value[3])`) and 1990+ (`r era_tab$median_women[4]` vs
+`r era_tab$median_men[4]`, p `r fmt_p(era_tab$p_value[4])`) there is no
+significant difference.
+
+Finally, we plot the lags of women and men side by side within each era,
+to see both the effect of era and any gender gap within it.
+
+```{r rq2-plot, fig.width=8, fig.cap="Recognition lag (years from birth to Wikipedia article) by gender and birth era."}
+boxplot(recognition_lag ~ gender_group + era, data = known,
+        col = c("pink", "lightblue"), at = c(1, 2, 4, 5, 7, 8, 10, 11), xaxt = "n",
+        main = "Recognition lag by gender and birth era",
+        xlab = "Birth era", ylab = "Years from birth to Wikipedia article")
+axis(1, at = c(1.5, 4.5, 7.5, 10.5), labels = levels(known$era))
+legend("topright", legend = c("Female", "Male"), fill = c("pink", "lightblue"))
+
+# save a copy for the poster
+dev.copy(png, file.path(fig_dir, "rq2_lag_by_gender_era.png"), width = 1600, height = 900, res = 200)
+invisible(dev.off())
+```
+
+The boxplot shows lag falling sharply from older to younger eras for
+both genders, mostly because Wikipedia only began in 2001. In the two
+oldest eras the women's boxes sit higher than the men's, while from 1970
+onwards they overlap almost completely.
+
+**Answer to RQ2:** overall, women are not recognised later than men.
+However, women born before 1970 received their article later in life
+than comparable men. The overall test hides this because women are
+concentrated in the younger eras, which have shorter lags. The gap has
+disappeared for recent generations.

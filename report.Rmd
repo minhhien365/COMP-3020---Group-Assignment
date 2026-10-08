@@ -8,15 +8,20 @@ output:
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_knit$set(root.dir = getwd())   # lets the section files find data/ and figures/
+# the repo folder (works when knitting AND when running chunks one by one)
+proj = if (is.null(knitr::current_input())) getwd() else dirname(knitr::current_input(dir = TRUE))
+knitr::opts_knit$set(root.dir = proj)
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 set.seed(3020)
-dir.create("figures", showWarnings = FALSE)
+
+# save poster figures with: png(file.path(fig_dir, "name.png"), ...)
+fig_dir = file.path(proj, "figures")
+dir.create(fig_dir, showWarnings = FALSE)
 ```
 
 ```{r load-data, include=FALSE}
-people = read.csv("data/people.csv", as.is = TRUE)
-edges  = read.csv("data/edges.csv", as.is = TRUE)
+people = read.csv(file.path(proj, "data/people.csv"), as.is = TRUE)
+edges  = read.csv(file.path(proj, "data/edges.csv"), as.is = TRUE)
 
 # birth year 2000 = Wikidata's placeholder for "20th century", so treat it as unknown
 people$birth_year[people$birth_year == 2000] = NA
