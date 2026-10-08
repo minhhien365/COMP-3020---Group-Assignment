@@ -1,0 +1,74 @@
+### Network properties
+
+```{r net-overview}
+data.frame(nodes       = vcount(g),
+           edges       = ecount(g),
+           density     = round(edge_density(g), 4),
+           isolates    = sum(degree(g) == 0),
+           reciprocity = round(reciprocity(g), 2))
+
+comp_w = components(g, mode = "weak")
+comp_s = components(g, mode = "strong")
+c(weak_components   = comp_w$no, largest_weak   = max(comp_w$csize),
+  strong_components = comp_s$no, largest_strong = max(comp_s$csize))
+
+table(comp_w$csize)   # how many components of each size
+```
+
+The network is very sparse: only 0.26% of all possible links exist. 474 of the 919 researchers (52%) have no links to or from anyone else in the dataset. The rest form one large weakly connected component of 365 people plus 33 small fragments of 2 to 6 people. This matches what the collection step expected: Wikipedia articles mostly link to famous names, so less prominent researchers often sit alone.
+
+We use the **largest weakly connected component (LCC)** for layout-based plots, because isolates contain no network information. The full graph is kept for the gender comparisons, so that dropping isolated people doesn't hide the gap.
+
+```{r net-lcc}
+lcc = induced_subgraph(g, which(comp_w$membership == which.max(comp_w$csize)))
+data.frame(nodes         = vcount(lcc),
+           edges         = ecount(lcc),
+           density       = round(edge_density(lcc), 4),
+           diameter      = diameter(lcc, directed = FALSE),
+           mean_distance = round(mean_distance(lcc, directed = FALSE), 2))
+```
+
+The LCC contains 365 people and 97% of the edges (2,134). Any two people in it are on average 4.3 links apart.
+
+### Are women more likely to be isolated?
+
+```{r net-isolated}
+V(g)$connected = degree(g) > 0
+iso_tab = table(V(g)$gender_group, ifelse(V(g)$connected, "connected", "isolated"))
+iso_tab
+round(prop.table(iso_tab, 1), 2)
+
+# Women vs men only (the 2 other/non-binary people are too few to test)
+chisq.test(iso_tab[c("female", "male"), ])
+```
+
+H0: whether a researcher is connected is independent of gender. H1: the two are associated. 59% of women are isolated compared with 49% of men (χ² = 5.63, df = 1, p = 0.018), so we reject H0 at the 5% level. Women's articles are less often linked into the network of other AI researchers. This repeats the under-representation found in RQ1, this time at the level of links rather than counts.
+
+### Degree distribution
+
+```{r net-degree, fig.width=9, fig.height=4}
+par(mfrow = c(1, 2))
+din = degree(g, mode = "in")
+hist(din, breaks = 50, main = "In-degree distribution",
+     xlab = "In-degree", col = "grey80")
+
+dd = degree_distribution(g, mode = "in")
+k = which(dd > 0) - 1; k = k[k > 0]
+plot(k, dd[k + 1], log = "xy", pch = 19,
+     main = "In-degree distribution (log-log)",
+     xlab = "In-degree (log)", ylab = "Proportion of nodes (log)")
+```
+
+In-degree is highly skewed: the median is 0 and the maximum is 61. On the log-log plot the points fall roughly along a line, the heavy-tailed pattern typical of web link networks, where a few hubs receive most of the links. There is also an unusual cluster of nodes with in-degree around 30.
+
+```{r net-clique}
+# Who has in- and out-degree of about 30?
+hub_ids  = V(g)$name[degree(g, mode = "in") >= 28 & degree(g, mode = "out") >= 28]
+clique   = induced_subgraph(g, hub_ids)
+c(people = vcount(clique), edges = ecount(clique),
+  possible = vcount(clique) * (vcount(clique) - 1),
+  share_of_all_edges = round(ecount(clique) / ecount(g), 2))
+table(V(clique)$gender_group)
+```
+
+These 31 people form a **complete clique**: every one of them links to every other, which gives 930 of the 930 possible edges and 42% of all links in the network. A pattern this regular almost certainly comes from a Wikipedia navigation template (navbox) placed on all 31 articles, not from editors linking people one by one. 30 of the 31 are men; Fei-Fei Li is the only woman. This matters for the centrality results that follow, because the clique raises the in-degree and PageRank of its members, almost all of whom are men. We therefore report centrality both with and without the clique edges.

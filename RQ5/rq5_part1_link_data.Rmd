@@ -1,0 +1,57 @@
+## 2.5 Network Analysis
+
+### Building the link network
+
+**Nodes** are the 919 AI researchers in `people`. **Edges** are hyperlinks: there is an edge from A to B where A's English Wikipedia article links to B's article. We used the MediaWiki API to get every article each person's page links to. We followed redirects so that alternative names match our titles, and kept only links that point to another person in the dataset. Self-links were removed.
+
+The graph is **directed**, because a link from A's article to B's is an editor's choice made on A's page and does not imply that B's page links back. Direction is also needed for in-degree ("how many researchers' pages point to you") and for PageRank.
+
+The collection code is shown below but not run when knitting, because it takes about 10 minutes. The saved result is loaded instead.
+
+```{r collect-edges, eval=FALSE}
+edges = data.frame(from = character(), to = character(), stringsAsFactors = FALSE)
+
+for (i in 1:nrow(people)) {
+  linked_titles = c()
+  cont = ""
+  repeat {
+    u = paste0(WIKI, "&action=query&generator=links&gplnamespace=0&gpllimit=max",
+               "&redirects=1&titles=", URLencode(people$title[i], reserved = TRUE), cont)
+    d = get_json(u)
+    if (is.null(d)) break
+    linked_titles = c(linked_titles, d$query$pages$title)
+    if (is.null(d$continue$gplcontinue)) break
+    cont = paste0("&gplcontinue=", URLencode(d$continue$gplcontinue, reserved = TRUE))
+  }
+  targets = people$qid[people$title %in% linked_titles]
+  targets = targets[targets != people$qid[i]]          # remove self-links
+  if (length(targets) > 0) {
+    edges = rbind(edges, data.frame(from = people$qid[i], to = targets))
+  }
+  Sys.sleep(0.2)
+}
+edges = unique(edges)
+write.csv(edges, "data/edges.csv", row.names = FALSE)
+```
+
+```{r load-network, message=FALSE}
+library(igraph)
+people = read.csv("data/people.csv", as.is = TRUE, encoding = "UTF-8")
+edges  = read.csv("data/edges.csv",  as.is = TRUE)
+
+# Edge List Check
+c(from_in_people = all(edges$from %in% people$qid),
+  to_in_people   = all(edges$to   %in% people$qid),
+  self_links     = sum(edges$from == edges$to),
+  duplicates     = sum(duplicated(edges)))
+
+# Directed graph; every person is a vertex, including those with no links
+g = graph_from_data_frame(edges, directed = TRUE,
+      vertices = people[, c("qid", "title", "gender_group", "era")])
+g
+
+# Share of links that are mutual (A -> B and B -> A)
+reciprocity(g)
+```
+
+The network has 919 nodes and 2,204 directed edges. 78% of the edges are reciprocated. A large part of this probably comes from Wikipedia navigation boxes: one template, such as a list of AI pioneers, links every person on it to every other person, which produces mutual links between people who never worked together. We keep the graph directed because 22% of links are one-way and PageRank uses that direction, but we treat navigation boxes' links as a limitation when interpreting centrality.
