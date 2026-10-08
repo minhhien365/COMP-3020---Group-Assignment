@@ -1,1 +1,220 @@
-naomi
+## Data collection
+
+### How the data was accessed
+
+We collected all the data from three free Wikimedia APIs. None of them need an API key.
+
+1. **Wikidata (SPARQL):** we used this to find the AI researchers, along with their
+   gender, birth year and a short description.
+2. **Wikipedia API:** we used this to get each person's article intro, article length,
+   the date the article was created, and the links to other articles.
+3. **Wikimedia page views API:** we used this to get how many times each article was
+   viewed.
+
+All three APIs return JSON, so we read them with `fromJSON()` from `jsonlite`, like
+in tut 2. Wikimedia blocks programs that don't identify themselves or that send
+requests too fast, so we wrote a helper function that sends a User-Agent and retries
+a request up to three times. We also paused between requests.
+
+The code below is not run when the report is knitted, because it takes about 25
+minutes and needs the internet. We saved the results to `data/people.csv` and
+`data/edges.csv` and the report loads those instead.
+
+```{r dc-setup, eval=FALSE}
+library("jsonlite")
+
+UA = "COMP3020-group-project (student project)"   # identifies our program to Wikimedia
+
+# download a URL and turn the JSON into R objects; retry up to 3 times
+get_json = function(u) {
+  for (attempt in 1:3) {
+    result = tryCatch({
+      con = url(u, headers = c("User-Agent" = UA))
+      txt = paste(readLines(con, warn = FALSE, encoding = "UTF-8"), collapse = "")
+      close(con)
+      fromJSON(txt)
+    }, error = function(e) NULL)
+    if (!is.null(result)) return(result)
+    Sys.sleep(2 * attempt)   # wait longer before each retry
+  }
+  return(NULL)
+}
+
+WIKI = "https://en.wikipedia.org/w/api.php?format=json&formatversion=2"
+```
+
+### Step 1: finding the AI researchers (Wikidata)
+
+We kept every human with an English Wikipedia article whose field of work is
+artificial intelligence (or a sub-field of it, like machine learning), or whose
+occupation is AI researcher. The `/wdt:P279*` part of the query is what pulls in
+the sub-fields.
+
+```{r dc-wikidata, eval=FALSE}
+query = '
+SELECT ?person ?article ?genderLabel ?description
+       (MIN(YEAR(?dob)) AS ?birth_year) (SAMPLE(?sl) AS ?sitelinks)
+WHERE {
+  { ?person wdt:P101/wdt:P279* wd:Q11660 . }
+  UNION
+  { ?person wdt:P106/wdt:P279* wd:Q15976092 . }
+  ?person wdt:P31 wd:Q5 ;
+          wdt:P21 ?gender ;
+          wikibase:sitelinks ?sl .
+  OPTIONAL { ?person wdt:P569 ?dob . }
+  OPTIONAL { ?person schema:description ?description .
+             FILTER(LANG(?description) = "en") }
+  ?article schema:about ?person ;
+           schema:isPartOf <https://en.wikipedia.org/> .
+  ?gender rdfs:label ?genderLabel . FILTER(LANG(?genderLabel) = "en")
+}
+GROUP BY ?person ?article ?genderLabel ?description
+'
+wd = get_json(paste0("https://query.wikidata.org/sparql?format=json&query=",
+                     URLencode(query, reserved = TRUE)))
+b = wd$results$bindings
+
+people = data.frame(
+  qid         = sub(".*/", "", b$person$value),
+  title       = gsub("_", " ", URLdecode(sub(".*/wiki/", "", b$article$value))),
+  gender      = b$genderLabel$value,
+  description = b$description$value,
+  birth_year  = as.numeric(b$birth_year$value),
+  sitelinks   = as.numeric(b$sitelinks$value),
+  stringsAsFactors = FALSE)
+people = people[!duplicated(people$qid), ]
+
+people$gender_group = ifelse(people$gender %in% c("female", "male"),
+                             people$gender, "other/non-binary")
+```
+
+### Step 2: article text, length and creation date (Wikipedia API)
+
+We got the intro text and article length 20 articles at a time. For the creation
+date we asked for each article's first edit, which has to be done one article at a
+time. Recognition lag (for RQ2) is then the creation year minus the birth year.
+
+```{r dc-wikipedia, eval=FALSE}
+# intro text and length, 20 articles per request
+groups = split(1:nrow(people), ceiling(seq_len(nrow(people)) / 20))
+for (g in groups) {
+  u = paste0(WIKI, "&action=query&prop=extracts|info&exintro=1&explaintext=1&exlimit=20",
+             "&titles=", URLencode(paste(people$title[g], collapse = "|"), reserved = TRUE))
+  d = get_json(u)
+  if (is.null(d)) next
+  m = match(d$query$pages$title, people$title)
+  people$intro_text[m[!is.na(m)]]    = d$query$pages$extract[!is.na(m)]
+  people$article_bytes[m[!is.na(m)]] = d$query$pages$length[!is.na(m)]
+  Sys.sleep(0.5)
+}
+
+# creation date = timestamp of the first edit
+for (i in 1:nrow(people)) {
+  u = paste0(WIKI, "&action=query&prop=revisions&rvprop=timestamp&rvlimit=1&rvdir=newer",
+             "&titles=", URLencode(people$title[i], reserved = TRUE))
+  d = get_json(u)
+  if (!is.null(d$query$pages$revisions[[1]]))
+    people$created[i] = d$query$pages$revisions[[1]]$timestamp
+  Sys.sleep(0.2)
+}
+people$created_year    = as.numeric(substr(people$created, 1, 4))
+people$recognition_lag = people$created_year - people$birth_year
+```
+
+### Step 3: page views (Wikimedia page views API)
+
+We added up the monthly views from October 2025 to September 2026. We only counted
+human readers, so bot traffic is left out.
+
+```{r dc-pageviews, eval=FALSE}
+for (i in 1:nrow(people)) {
+  t = URLencode(gsub(" ", "_", people$title[i]), reserved = TRUE)
+  u = paste0("https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/",
+             "en.wikipedia/all-access/user/", t, "/monthly/20251001/20260930")
+  d = get_json(u)
+  people$pageviews_12m[i] = if (is.null(d)) 0 else sum(d$items$views)
+  Sys.sleep(0.2)
+}
+```
+
+### Step 4: links between researchers (Wikipedia API)
+
+For each person we got every article their page links to and only kept the links
+that go to someone else in our dataset. The API only gives 500 links per request,
+so for long articles we kept asking for the next batch until there were none left.
+
+```{r dc-links, eval=FALSE}
+edges = data.frame(from = character(), to = character(), stringsAsFactors = FALSE)
+for (i in 1:nrow(people)) {
+  linked = c(); cont = ""
+  repeat {
+    u = paste0(WIKI, "&action=query&generator=links&gplnamespace=0&gpllimit=max&redirects=1",
+               "&titles=", URLencode(people$title[i], reserved = TRUE), cont)
+    d = get_json(u)
+    if (is.null(d)) break
+    linked = c(linked, d$query$pages$title)
+    if (is.null(d$continue$gplcontinue)) break
+    cont = paste0("&gplcontinue=", URLencode(d$continue$gplcontinue, reserved = TRUE))
+  }
+  targets = setdiff(people$qid[people$title %in% linked], people$qid[i])  # no self-links
+  if (length(targets) > 0) edges = rbind(edges, data.frame(from = people$qid[i], to = targets))
+  Sys.sleep(0.2)
+}
+edges = unique(edges)
+
+write.csv(people, "data/people.csv", row.names = FALSE, fileEncoding = "UTF-8")
+write.csv(edges,  "data/edges.csv",  row.names = FALSE, fileEncoding = "UTF-8")
+```
+
+### R packages
+
+- `jsonlite` for reading the API data
+- base R for the hypothesis tests and plots (RQ1, RQ2)
+- `tm`, `SnowballC` and `wordcloud` for the text analysis (RQ3, RQ4)
+- `igraph` for the network analysis (RQ5)
+
+### Variables and volume
+
+```{r dc-summary}
+table(people$gender_group)
+```
+
+| Variable | Description |
+|:-------------------------|:-------------------------------------------------------|
+| `qid`, `title` | Wikidata ID and Wikipedia article title |
+| `gender_group` | female, male or other/non-binary |
+| `birth_year`, `era` | birth year and birth era (pre-1950, 1950-69, 1970-89, 1990+) |
+| `created_year` | year the Wikipedia article was created |
+| `recognition_lag` | `created_year - birth_year` (RQ2) |
+| `intro_text` | the article's intro text (RQ3, RQ4) |
+| `article_bytes`, `pageviews_12m`, `sitelinks` | article length, page views in the last year, number of language versions |
+| `in_degree`, `out_degree` | links to / from other people in the dataset (RQ5) |
+
+### Data cleaning
+
+When Wikidata only knows someone was born in the 20th century, it saves their birth
+year as 2000. This happened for 21 people (for example Alex Krizhevsky and Ruslan
+Salakhutdinov), so we set their birth year to unknown. That leaves
+`r sum(is.na(people$birth_year))` people
+(`r round(100 * mean(is.na(people$birth_year)))`%) with no birth year. They are left
+out of anything split by era, which leaves `r nrow(known)` women and men.
+
+### Limitations
+
+- Not every AI researcher is tagged with a field of work on Wikidata, so we only
+  have the ones that are tagged.
+- We only have people who already have an English Wikipedia article. Anyone
+  Wikipedia has missed completely can't be in the data, and this could affect women
+  more.
+- Birth year is missing more often for women
+  (`r round(100 * mean(is.na(people$birth_year[people$gender_group == "female"])))`%)
+  than men
+  (`r round(100 * mean(is.na(people$birth_year[people$gender_group == "male"])))`%),
+  so women are under-counted in the era analyses.
+- Gender on Wikidata is almost all female or male. Only
+  `r sum(!people$gender_group %in% c("female", "male"))` people are recorded as
+  something else, which is too few to analyse.
+- Wikipedia and Wikidata change every day, so running the code again would give
+  slightly different numbers.
+- If a request still failed after three tries we skipped it, so a few values (like
+  someone's links) might be missing.
