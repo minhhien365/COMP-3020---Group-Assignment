@@ -1,54 +1,12 @@
----
-title: "RQ5: Are women central in the network of AI biographies?"
-output: pdf_document
----
+## RQ5: Are women central in the network of AI biographies?
 
-```{r rq5-setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
-people = read.csv("data/people.csv", as.is = TRUE, encoding = "UTF-8")
-edges  = read.csv("data/edges.csv",  as.is = TRUE)
-
-# same birth year fix as report.Rmd
-people$birth_year[people$birth_year == 2000] = NA
-people$era = ifelse(is.na(people$birth_year), "unknown",
-             ifelse(people$birth_year < 1950, "pre-1950",
-             ifelse(people$birth_year < 1970, "1950-69",
-             ifelse(people$birth_year < 1990, "1970-89", "1990+"))))
-```
-
-## Building the link network
+### Building the link network
 
 **Nodes** are the 919 AI researchers in `people`. **Edges** are hyperlinks: there is an edge from A to B where A's English Wikipedia article links to B's article. We used the MediaWiki API to get every article each person's page links to. We followed redirects so that alternative names match our titles, and kept only links that point to another person in the dataset. Self-links were removed.
 
 The graph is **directed**, because a link from A's article to B's is an editor's choice made on A's page and does not imply that B's page links back. Direction is also needed for in-degree ("how many researchers' pages point to you") and for PageRank.
 
-The collection code is shown below but not run when knitting, because it takes about 10 minutes. The saved result is loaded instead.
-
-```{r rq5-collect-edges, eval=FALSE}
-edges = data.frame(from = character(), to = character(), stringsAsFactors = FALSE)
-
-for (i in 1:nrow(people)) {
-  linked_titles = c()
-  cont = ""
-  repeat {
-    u = paste0(WIKI, "&action=query&generator=links&gplnamespace=0&gpllimit=max",
-               "&redirects=1&titles=", URLencode(people$title[i], reserved = TRUE), cont)
-    d = get_json(u)
-    if (is.null(d)) break
-    linked_titles = c(linked_titles, d$query$pages$title)
-    if (is.null(d$continue$gplcontinue)) break
-    cont = paste0("&gplcontinue=", URLencode(d$continue$gplcontinue, reserved = TRUE))
-  }
-  targets = people$qid[people$title %in% linked_titles]
-  targets = targets[targets != people$qid[i]]          # remove self-links
-  if (length(targets) > 0) {
-    edges = rbind(edges, data.frame(from = people$qid[i], to = targets))
-  }
-  Sys.sleep(0.2)
-}
-edges = unique(edges)
-write.csv(edges, "data/edges.csv", row.names = FALSE)
-```
+The collection code is in `data_collection_guide.Rmd` in the repository; here we load the saved result (`edges`, loaded in the setup chunk of the report).
 
 ```{r rq5-load-network, message=FALSE}
 library(igraph)
@@ -70,7 +28,7 @@ mean(paste(edges$to, edges$from) %in% paste(edges$from, edges$to))
 
 The network has 919 nodes and 2,204 directed edges. 78% of the edges are reciprocated. A large part of this probably comes from Wikipedia navigation boxes: one template, such as a list of AI pioneers, links every person on it to every other person, which produces mutual links between people who never worked together. We keep the graph directed because 22% of links are one-way and PageRank uses that direction, but we treat navigation boxes' links as a limitation when interpreting centrality.
 
-## Network properties
+### Network properties
 
 ```{r rq5-overview}
 data.frame(nodes       = vcount(g),
@@ -102,7 +60,7 @@ data.frame(nodes         = vcount(lcc),
 
 The LCC contains 365 people and 97% of the edges (2,134). Any two people in it are on average 4.3 links apart.
 
-## Are women more likely to be isolated?
+### Are women more likely to be isolated?
 
 ```{r rq5-isolated}
 V(g)$connected = degree(g) > 0
@@ -124,7 +82,7 @@ HA: the two are not independent.
 
 All expected counts are above 100, so the chi-squared approximation is reliable. 59% of women are isolated compared with 49% of men ($\chi^2$ = 5.63, df = 1, p = 0.018), so we reject H0 at the 5% level. Women's articles are less often linked into the network of other AI researchers. This repeats the under-representation found in RQ1, this time at the level of links rather than counts. However, the article age check at the end of this section shows that this gap comes from women's articles being newer, not from gender itself.
 
-## Degree distribution
+### Degree distribution
 
 ```{r rq5-degree, fig.width=9, fig.height=4, fig.cap="In-degree distribution of the link network."}
 par(mfrow = c(1, 2))
@@ -153,7 +111,7 @@ table(V(clique)$gender_group)
 
 These 31 people form a **complete clique**: every one of them links to every other, which gives 930 of the 930 possible edges and 42% of all links in the network. A pattern this regular almost certainly comes from a Wikipedia navigation template (navbox) placed on all 31 articles, not from editors linking people one by one. 30 of the 31 are men, and Fei-Fei Li is the only woman. This matters for the centrality results that follow, because the clique raises the in-degree and PageRank of its members, almost all of whom are men. We therefore report centrality both with and without the clique edges.
 
-## Centrality: in-degree and PageRank
+### Centrality: in-degree and PageRank
 
 We use two centrality measures:
 
@@ -182,7 +140,7 @@ cor(cent$indeg, cent$pr, method = "spearman")
 
 The two measures agree closely (Spearman's rho = 0.98), so they rank people in nearly the same order.
 
-## Important nodes
+### Important nodes
 
 ```{r rq5-top}
 head(cent[order(-cent$pr),    c("title", "gender", "era", "indeg",    "pr")],    10)
@@ -193,7 +151,7 @@ On the full network, the top 10 are the field's founders and the best-known deep
 
 Janet Kolodner reaches 10th place in the clique-removed network even though only 3 articles link to her, and Katia Sycara (in-degree 6) is 11th. Their articles link only to each other, so the pair forms a closed loop with no way out except a random jump. The random surfer gets stuck there and builds up score. This is why we read PageRank alongside in-degree rather than on its own.
 
-## Are women less central?
+### Are women less central?
 
 ```{r rq5-gender}
 mf = cent[cent$gender != "other/non-binary", ] # ignore minority
@@ -210,10 +168,10 @@ sapply(c(full = "pr", no_clique = "pr_nc"),
 top10    = mf$pr    >= quantile(mf$pr,    0.9)
 top10_nc = mf$pr_nc >= quantile(mf$pr_nc, 0.9)
 
-ct = chisq.test(table(mf$gender, top10))
+ct_top = chisq.test(table(mf$gender, top10))
 table(mf$gender, top10)
-ct$expected                                   # all well above 5
-ct
+ct_top$expected                                   # all well above 5
+ct_top
 chisq.test(table(mf$gender, top10_nc))
 ```
 
@@ -227,7 +185,7 @@ All expected counts are well above 5, so the chi-squared approximation is reliab
 
 **The gender gap in centrality is not caused by the navbox template.**
 
-## By era
+### By era
 
 ```{r rq5-era}
 ke = mf[mf$era != "unknown", ]
@@ -237,7 +195,7 @@ xtabs(~ era + gender, ke)                                               # group 
 
 Women's mean PageRank is below men's in every era. The gap is widest among researchers born before 1950: women average 1.07 and men 1.45, so women reach about 74% of men's level. It narrows for those born 1950-69 (0.96 vs 1.12) and 1970-89 (0.79 vs 0.92), where women reach about 86%. The 1990+ group holds only 2 women and 22 men, which is too few to compare. This fits the RQ1 trend: the gap is smaller in younger generations, but it has not closed.
 
-## Visualising the network
+### Visualising the network
 
 Both plots use the same colours and sizes. Women are orange, men are purple and other/non-binary researchers are grey. These two colours can still be told apart by colour-blind readers. Node size shows PageRank ($\alpha$ = 0.8), calculated on the full graph `g`, so a node's size reflects its importance in the whole network and not just in the part being plotted. We only label a few names so the plots stay readable.
 
@@ -246,10 +204,9 @@ Both plots use the same colours and sizes. Women are orange, men are purple and 
 pr_full = page_rank(g, damping = 0.8)$vector
 gender_col = c(female = "#E66100", male = "#5D3A9B", "other/non-binary" = "grey60")
 
-dir.create("figures", showWarnings = FALSE)
 ```
 
-## Full network
+### Full network
 
 We plot the largest weakly connected component, which has 365 researchers and 97% of all links. The other 474 researchers have no links at all, and the 33 small fragments only have 70 links between them, so including them would just add a ring of loose dots. In this plot we label the 8 most central women. The most central men all sit inside the clique, so their labels would overlap, and they are labelled in the subgraph below instead.
 
@@ -274,7 +231,7 @@ draw_full = function() {
 }
 draw_full()
 
-png("figures/rq5_network_full.png", width = 1800, height = 1800, res = 200)
+png(file.path(fig_dir, "rq5_network_full.png"), width = 1800, height = 1800, res = 200)
 draw_full()
 invisible(dev.off())
 
@@ -283,7 +240,7 @@ table(V(lcc)$gender_group)
 
 The network has one dense centre with sparser branches around it. The centre is the navbox clique of 31 researchers who all link to each other, and 30 of them are men. Women appear across the middle ring and the branches, but apart from Fei-Fei Li none of them are in the dense centre. `r sum(V(lcc)$gender_group == "female")` of the `r vcount(lcc)` people in the component are women (`r round(100 * mean(V(lcc)$gender_group == "female"))`%), compared with 24% of the whole dataset, which matches the isolation result above.
 
-## Subgraph: the 40 most central researchers
+### Subgraph: the 40 most central researchers
 
 RQ5 asks who is central and whether women are among them. The core of the full plot is too dense to read, so we zoom in on the 40 researchers with the highest PageRank (the top 4%). This shows how many women make it into the core and what holds the core together. Links between two clique members are light grey and all other links are dark grey, so links that come from the navbox template can be told apart from links that editors wrote into the article text. The nodes are placed in a circle with the clique members on one side and everyone else on the other, because a force-directed layout squashes the 31-person clique into a blob.
 
@@ -323,7 +280,7 @@ draw_sub = function() {
 }
 draw_sub()
 
-png("figures/rq5_top40.png", width = 1800, height = 1800, res = 200)
+png(file.path(fig_dir, "rq5_top40.png"), width = 1800, height = 1800, res = 200)
 draw_sub()
 invisible(dev.off())
 
@@ -344,9 +301,9 @@ The four women got into the top 40 in different ways. Fei-Fei Li is there throug
 
 If we set that artefact aside, only 2 of the 40 most central researchers (5%) are women with a real position in the network. This supports the centrality results: women are clearly under-represented among the most central researchers in AI's Wikipedia network.
 
-## How data collection and network construction affect the findings
+### How data collection and network construction affect the findings
 
-### Newer articles have fewer links
+#### Newer articles have fewer links
 
 An article can only collect links after it has been written, and it takes time for other editors to link back to it. If women's articles are newer on average, part of their lower centrality could come from article age rather than gender, so we test this directly.
 
@@ -393,7 +350,7 @@ The isolation result above is explained by article age. Within each period, wome
 
 The gap at the top is not fully explained by article age. For articles created before 2015 there is no difference (14% of women and 16% of men are in the top 10%, p = 0.97). For articles created in 2015 or later, only 1% of women reach the top 10% compared with 8% of men (p = 0.003). Some of this is the navbox again, since 14 of the 26 recent men in the top 10% are on it (for example Ilya Sutskever, Andrej Karpathy and Ashish Vaswani) and no recent woman is. With the clique links removed, the gap among recent articles gets smaller but is still there (1% vs 6%, p = 0.03). So women are under-represented at the top among recently documented researchers, partly because of the template and partly because editors link to recent women less often.
 
-### Other limitations
+#### Other limitations
 
 **Data collection and sampling.** A person is only a node if Wikidata tags them as working in AI and they have an English Wikipedia article. Links to anyone outside this sample are dropped, including AI researchers with missing tags and people in neighbouring fields, so part of the 52% isolation rate comes from where we drew the boundary rather than from a real lack of links. We also only used English Wikipedia, so researchers who are better covered in other languages look less central than they are. The links were collected once, and Wikipedia changes every day. Recently created articles, which are more often about women, have had the least time to gain links.
 
@@ -401,6 +358,6 @@ The gap at the top is not fully explained by article age. For articles created b
 
 **Network construction.** An edge means an editor chose to mention B on A's page. It is not a collaboration or a citation, so centrality here measures attention on Wikipedia rather than influence in research. The links API also returns navbox links, and one template produced 42% of all edges, which is why we reported every centrality result with and without it. Smaller templates may still be in the data. Edges are unweighted, so mentioning someone once counts the same as discussing them at length. PageRank depends on the choice of $\alpha$ = 0.8 and can be inflated by rank sinks like Kolodner and Sycara, which is why we read it alongside in-degree and checked the top-ranked people by hand. Finally, gender comes from Wikidata and is mostly binary. The 2 other/non-binary researchers stayed in the network but were left out of the gender tests because there are too few of them to test.
 
-## Summary of RQ5
+### Summary of RQ5
 
 Women are less central than men in the network of AI biographies. Only 3.7% of women are in the top 10% by PageRank compared with 12.0% of men, and only 2 of the 40 most central researchers are women with a real position in the network. This gap is not caused by the navbox template, because it stays the same when the template links are removed. It is concentrated in recently created articles, though. For older articles there is no difference between women and men, while among articles created from 2015 onwards women rarely reach the top. Women are also more often isolated, but that is explained by their articles being newer.
