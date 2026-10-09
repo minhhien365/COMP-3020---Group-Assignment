@@ -1,0 +1,358 @@
+---
+title: 'RQ3 and RQ4: How are women and men in AI described?'
+author: "Amber Tran"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float: true
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 5)
+library(tidyverse)   
+#tidyverse helps with data wrangling and ggplot2 charts
+library(tidytext)    
+#tidytext helps with splitting text into words, stop words, tf-idf
+library(cluster)     
+#silhouette widths
+dir.create("figures", showWarnings = FALSE)
+```
+
+1:Load the data
+
+Columns are renamed so the code is easier to read, and only people identified as female or male are kept.
+
+```{r}
+people <- read_csv("data/people.csv") |>
+  rename(wikidata_id = qid, name = title, intro = intro_text) |>
+  filter(gender %in% c("female", "male")) |>
+  mutate(era    = factor(era, levels = c("pre-1950", "1950-69", "1970-89", "1990+")),
+         gender = factor(gender, levels = c("female", "male")))
+
+glimpse(people)
+nrow(people)
+```
+
+Group sizes: number of women and men in each birth era.
+
+```{r}
+people |>
+  count(era, gender) |>
+  pivot_wider(names_from = gender, values_from = n, values_fill = 0)
+```
+
+2. Clean the text
+a. Remove unusable text
+
+```{r}
+n_missing <- sum(is.na(people$intro) | str_trim(people$intro) == "")
+n_missing
+
+people_text <- people |>
+  filter(!is.na(intro), str_trim(intro) != "")
+```
+
+b. Words of each person's own name, so they can be removed from their own intro.
+
+```{r}
+name_tokens <- people_text |>
+  select(wikidata_id, name) |>
+  unnest_tokens(word, name) |>
+  distinct()
+
+custom_stop <- tibble(word = c("born", "also", "known"))
+```
+
+c. Tokenise and clean
+
+```{r}
+tokens <- people_text |>
+  select(wikidata_id, gender, era, intro) |>
+  unnest_tokens(word, intro) |>
+  filter(!str_detect(word, "[0-9]"), str_length(word) > 2) |>
+  anti_join(stop_words, by = "word") |>
+  anti_join(custom_stop, by = "word") |>
+  anti_join(name_tokens, by = c("wikidata_id", "word"))
+
+head(tokens)
+```
+
+3. Represent the text
+
+Each person's intro is one document, represented as a bag of words. Counts are converted to tf-idf weights.
+
+```{r}
+word_counts <- tokens |> count(wikidata_id, word)
+
+tfidf_long <- word_counts |> bind_tf_idf(word, wikidata_id, n)
+
+keep_words <- word_counts |> count(word) |> filter(n >= 5) |> pull(word)
+
+tfidf_mat <- tfidf_long |>
+  filter(word %in% keep_words) |>
+  cast_sparse(wikidata_id, word, tf_idf) |>
+  as.matrix()
+
+dim(tfidf_mat)   #rows=people, columns=words kept
+```
+
+Summary of the text: 
+
+```{r}
+tibble(
+  people_with_text = n_distinct(tokens$wikidata_id),
+  total_words      = nrow(tokens),
+  distinct_words   = n_distinct(tokens$word),
+  words_kept_tfidf = length(keep_words)
+)
+
+#Length of cleaned intros, women vs men
+tokens |>
+  count(wikidata_id, gender) |>
+  group_by(gender) |>
+  summarise(people = n(),
+            median_words = median(n),
+            mean_words = round(mean(n), 1),
+            .groups = "drop")
+```
+
+4. RQ3: How are women and men described?
+
+Figure 1: most frequent words overall
+
+```{r}
+plot_freq <- tokens |>
+  count(word, sort = TRUE) |>
+  slice_head(n = 20) |>
+  ggplot(aes(n, reorder(word, n))) +
+  geom_col() +
+  labs(title = "Most frequent words in AI biographies",
+       x = "Number of occurrences", y = NULL)
+plot_freq
+ggsave("figures/freq_words_overall.png", plot_freq, width = 6, height = 5, dpi = 300)
+```
+Figure 2: top words for women vs men
+
+There are far more men than women, so the chart uses each word's share of all words within a gender instead of raw counts.
+
+```{r plot-gender}
+plot_gender <- tokens |>
+  count(gender, word) |>
+  group_by(gender) |>
+  mutate(share = n / sum(n)) |>
+  slice_max(share, n = 12, with_ties = FALSE) |>
+  ungroup() |>
+  ggplot(aes(share, reorder_within(word, share, gender), fill = gender)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_reordered() +
+  facet_wrap(~gender, scales = "free_y") +
+  labs(title = "Most frequent words: women vs men",
+       x = "Share of all words", y = NULL)
+plot_gender
+ggsave("figures/freq_words_gender.png", plot_gender, width = 8, height = 5, dpi = 300)
+```
+Figure 3: distinctive words by era and gender
+
+Each era and gender group is treated as one document and tf-idf is calculated across the groups. A word only counts if at least `min_people` different people in that group use it.
+
+```{r plot-era, fig.height=10}
+min_people <- 3
+
+group_sizes <- tokens |>
+  filter(!is.na(era)) |>
+  distinct(wikidata_id, era, gender) |>
+  count(era, gender, name = "group_n")
+group_sizes
+
+plot_era <- tokens |>
+  filter(!is.na(era)) |>
+  mutate(group = paste(era, gender, sep = " | ")) |>
+  group_by(group, word) |>
+  summarise(n = n(), n_people = n_distinct(wikidata_id), .groups = "drop") |>
+  bind_tf_idf(word, group, n) |>
+  filter(n_people >= min_people) |>
+  group_by(group) |>
+  slice_max(tf_idf, n = 6, with_ties = FALSE) |>
+  ungroup() |>
+  left_join(
+    group_sizes |>
+      mutate(group = paste(era, gender, sep = " | "),
+             group_label = paste0(group, " (n=", group_n, ")")) |>
+      select(group, group_label),
+    by = "group"
+  ) |>
+  filter(n_people >= min_people, tf_idf > 0) |>
+  ggplot(aes(tf_idf, reorder_within(word, tf_idf, group_label))) +
+  geom_col() +
+  scale_y_reordered() +
+  facet_wrap(~group_label, scales = "free_y", ncol = 2) +
+  labs(title = "Most distinctive words by era and gender (tf-idf)",
+       subtitle = paste0("Words used by at least ", min_people, " people in the group"),
+       x = "tf-idf", y = NULL)
+plot_era
+ggsave("figures/distinctive_words_era_gender.png", plot_era,
+       width = 8, height = 10, dpi = 300)
+```
+Analysis: 
+
+RQ3: Is the way Wikipedia describes women in AI different from the way it describes men?
+Method: Each Wikipedia introduction was split into single words, removing numbers, words of one or two letters, common stop words, a few uninformative words, and each person's own name. We compared word frequencies overall, for women and men separately, and for birth-era and gender groups using tf-idf. All comparisons are descriptive and untested.
+Across all biographies, the most frequent words are computer, university, professor, intelligence and research (Figure 1), so people in AI are described mainly by their academic positions and affiliations, with american also in the top ten. Women and men share a very similar vocabulary (Figure 2, which uses each word's share within a gender because there are far more men): university, research, professor and intelligence are in both top tens. The differences are small and untested: research, scientist, institute and technology take a slightly larger share of women's introductions, while machine and systems appear among men's top words but not women's. By era (Figure 3, words used by at least three people in a group), alliance, minister, manager and roles distinguish women born 1970-89, and women is the most distinctive word for those born before 1950. Men born before 1950 are distinguished by classic AI terms (fuzzy, lisp, pattern), and men born 1990 or later by industry terms (openai, anthropic, business, models). Women born 1990 or later do not appear in Figure 3, because no distinguishing word met the threshold.
+
+5. RQ4: Which AI subfields do women and men appear in, and how does the distribution differ?
+
+5.1: Data representation and distance: Each person is a row of tf-idf weights over the kept words. Each row is scaled to length 1 so that longer intros do not look different just because of their length. With unit-length rows, Euclidean distance ranks pairs of people the same way as cosine distance.
+
+```{r normalise}
+row_norm <- sqrt(rowSums(tfidf_mat^2))
+m_norm   <- tfidf_mat[row_norm > 0, , drop = FALSE] / row_norm[row_norm > 0]
+dim(m_norm)
+```
+
+5.2: Choosing the number of clusters (k)
+
+Elbow plot and average silhouette width for k = 2 to 10.
+
+```{r choose-k}
+set.seed(1)
+ks   <- 2:10
+fits <- map(ks, \(k) kmeans(m_norm, centers = k, nstart = 10, iter.max = 50))
+d    <- dist(m_norm)
+
+k_check <- tibble(
+  k          = ks,
+  elbow      = map_dbl(fits, "tot.withinss"),
+  silhouette = map_dbl(fits, \(f) mean(silhouette(f$cluster, d)[, 3]))
+)
+k_check
+
+p_k <- k_check |>
+  pivot_longer(c(elbow, silhouette), names_to = "measure") |>
+  ggplot(aes(k, value)) +
+  geom_line() + geom_point() +
+  facet_wrap(~measure, scales = "free_y") +
+  scale_x_continuous(breaks = ks) +
+  labs(title = "Choosing the number of clusters", y = NULL)
+p_k
+ggsave("figures/choose_k.png", p_k, width = 8, height = 4, dpi = 300)
+```
+
+5.3: Run the clustering
+
+```{r run-kmeans}
+K <- 5   # chosen for interpretability
+set.seed(1)
+km <- kmeans(m_norm, centers = K, nstart = 25, iter.max = 100)
+table(km$cluster)
+```
+
+5.4: What is each cluster about? 
+
+```{r}
+cluster_words <- map_dfr(seq_len(K), \(i) {
+  ctr <- km$centers[i, ]
+  tibble(cluster = i,
+         size = sum(km$cluster == i),
+         top_words = paste(names(sort(ctr, decreasing = TRUE))[1:8], collapse = ", "))
+})
+cluster_words
+
+ctr_norm <- km$centers / sqrt(rowSums(km$centers^2))
+cos_sims <- m_norm %*% t(ctr_norm)
+
+examples <- map_dfr(seq_len(K), \(i) {
+  members <- which(km$cluster == i)
+  top <- members[order(cos_sims[members, i], decreasing = TRUE)][seq_len(min(3, length(members)))]
+  tibble(cluster = i, wikidata_id = rownames(m_norm)[top])
+}) |>
+  left_join(select(people, wikidata_id, name), by = "wikidata_id") |>
+  group_by(cluster) |>
+  summarise(closest_people = paste(name, collapse = "; "))
+examples
+```
+Cluster names, in order 1 to 5: 
+```{r}
+cluster_names <- c("Machine learning & statistics",
+                   "Language & linguistics",
+                   "Founders & entrepreneurs",
+                   "Electrical engineering",
+                   "General AI & computer science")
+```
+
+5.5: Visualise the clusters: PCA splits the many word dimensions into 2 so the clusters can be drawn. It shows only part of the structure.
+
+```{r}
+clusters <- tibble(wikidata_id = rownames(m_norm),
+                   cluster = km$cluster) |>
+  left_join(select(people, wikidata_id, name, gender, era), by = "wikidata_id") |>
+  mutate(cluster_label = factor(cluster, levels = seq_len(K), labels = cluster_names))
+
+pc <- prcomp(m_norm, rank. = 2)
+p_clusters <- clusters |>
+  mutate(PC1 = pc$x[, 1], PC2 = pc$x[, 2]) |>
+  ggplot(aes(PC1, PC2, colour = cluster_label)) +
+  geom_point(alpha = 0.6) +
+  labs(title = "AI biographies clustered by intro text (PCA view)",
+       colour = "Cluster")
+p_clusters
+ggsave("figures/clusters_pca.png", p_clusters, width = 7, height = 5, dpi = 300)
+```
+
+Check-up: 
+
+```{r}
+nrow(m_norm); nrow(people_text)          # people reduced before clustering
+nrow(clusters) == nrow(m_norm)           
+anyDuplicated(people$wikidata_id)     
+sum(is.na(clusters$era))                 # people with no recorded era
+```
+
+5.6:Women and men across clusters: Chi-square test of independence on the cluster-by-gender table. We have to check the expected counts first.
+
+```{r}
+tab <- table(clusters$cluster_label, clusters$gender)
+tab
+round(chisq.test(tab)$expected, 1)   # ideally all values are 5 or more
+chisq.test(tab)
+```
+Women's share in each cluster, by birth era. Groups with fewer than 10 people are abolished because small groups give unreliable shares.
+
+```{r}
+share_cluster_era <- clusters |>
+  filter(!is.na(era)) |>
+  group_by(cluster_label, era) |>
+  summarise(n = n(), share_women = mean(gender == "female"), .groups = "drop") |>
+  filter(n >= 10)
+share_cluster_era
+
+p_share <- ggplot(share_cluster_era, aes(era, share_women)) +
+  geom_col() +
+  geom_text(aes(label = paste0("n=", n)), vjust = -0.3, size = 3) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1.1),
+                     breaks = c(0, 0.25, 0.5, 0.75, 1)) +
+  facet_wrap(~cluster_label) +
+  labs(title = "Share of women in each cluster, by birth era",
+       subtitle = "Era groups with fewer than 10 people omitted",
+       x = "Birth era", y = "Share of women") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p_share
+ggsave("figures/share_women_cluster_era.png", p_share,
+       width = 8, height = 6, dpi = 300)
+
+saveRDS(clusters, "data/clusters.rds")
+```
+
+Analysis: 
+RQ4: Which AI subfields do women and men appear in, and how does the distribution differ?
+Method: Each cleaned introduction became a tf-idf vector over words used by at least five people, scaled to length 1 so introduction length does not matter (making Euclidean distance equivalent to cosine distance). We clustered the 909 people with usable text using k-means (k chosen from 2-10 by the elbow and silhouette width, fixed seed), described each cluster by its top words and closest people, and tested cluster-by-gender association with a chi-square test, then examined women's share by birth era.
+Choosing the number of clusters: The elbow plot has no bend, and silhouette widths are low for every k (all < 0.011), so the clusters overlap. The highest values were at k = 9 and 10, but the differences are tiny. We chose k = 5 because the clusters were interpretable and large enough to compare by gender and era.
+The clusters: Machine learning and statistics (n = 141): learning, machine, statistics, neural (e.g. Barbara Hammer). Language and linguistics (n = 68): language, linguistics, natural, computational (e.g. Emily M. Bender). Founders and entrepreneurs (n = 117): founder, company, entrepreneur, ceo, grouping people by business role (e.g. Robin Li). Electrical engineering (n = 107): engineering, electrical, ieee, systems (e.g. Pramod Varshney). General AI and computer science (n = 476), the largest, looks like a catch-all for academics described in general AI terms. The PCA plot shows heavy overlap in the centre, matching the low silhouette values.
+Women and men across clusters: Women are 24.0% of the 909 people but 45.6% of Language and linguistics (31 of 68) and 17.0% of Machine learning and statistics (24 of 141). The association is statistically significant, x^2(4, N = 909) = 23.2, p < 0.001, and all expected counts were at least 5.
+Women's share by birth era: Groups with fewer than 10 people and the 178 people with no birth era are omitted. Women's share is higher for people born 1970-89 than earlier in three clusters: Founders and entrepreneurs (about 3% to 35%), Electrical engineering (11-12% to 33%, from only 18 people), and General AI and computer science (12% to 24-27%). Machine learning and statistics stays low throughout (0-18%), and Language and linguistics has too few people in recent eras to show change. These patterns are descriptive and based on small groups.
+
+
+
